@@ -71,6 +71,7 @@ Configuration:
 References:
  - http://erlang.org/doc/man/erlang.html#trace-3
  - http://erlang.org/doc/man/erlang.html#trace_pattern-3
+ - http://erlang.org/doc/apps/erts/match_spec.html
 
 Command Line:
   The only supported command-line usage is simply \"" ?TRACER_STR "\", which
@@ -81,6 +82,10 @@ Command Line:
     outdev,
     rebar_pid,
     count       = 0,
+    fmt_4       = "~p:~n\t~p~n",
+    fmt_5       = "~p:~n\t~p~n\t~p~n",
+    fmt_ts_4    = "~p:~p:~n\t~p~n",
+    fmt_ts_5    = "~p:~p:~n\t~p~n\t~p~n",
     done_pid    = undefined,
     done_ref    = undefined,
     done_reply  = undefined
@@ -150,7 +155,7 @@ kill() ->
             ok
     end.
 
--spec stats() -> {?TRACER, [{atom(), term()}]} | {error, {?MODULE, not_running}}.
+-spec stats() -> {?TRACER, [{atom(), term()}]} | {error, {?MODULE, term()}}.
 %%
 %% @doc Return the tracer configuration.
 %%
@@ -310,9 +315,24 @@ tracer_recv(State) ->
             handle_msg(State, Msg)
     end.
 
-handle_msg(#state{
-        outdev = OutDev, count = Count} = State, {trace, _Pid, Op, MFA}) ->
-    io:format(OutDev, "~p: ~p~n", [Op, MFA]),
+handle_msg(#state{outdev = OutDev, count = Count, fmt_4 = Format} = State,
+        {trace, _Pid, Op, Inf1}) ->
+    write_file(OutDev, Format, [Op, Inf1]),
+    tracer_recv(State#state{count = (Count + 1)});
+
+handle_msg(#state{outdev = OutDev, count = Count, fmt_5 = Format} = State,
+    {trace, _Pid, Op, Inf1, Inf2}) ->
+    write_file(OutDev, Format, [Op, Inf1, Inf2]),
+    tracer_recv(State#state{count = (Count + 1)});
+
+handle_msg(#state{outdev = OutDev, count = Count, fmt_ts_4 = Format} = State,
+    {trace_ts, _Pid, Op, Inf1, TS}) ->
+    write_file(OutDev, Format, [Op, TS, Inf1]),
+    tracer_recv(State#state{count = (Count + 1)});
+
+handle_msg(#state{outdev = OutDev, count = Count, fmt_ts_5 = Format} = State,
+    {trace_ts, _Pid, Op, Inf1, Inf2, TS}) ->
+    write_file(OutDev, Format, [Op, TS, Inf1, Inf2]),
     tracer_recv(State#state{count = (Count + 1)});
 
 handle_msg(#state{count = Count} = State, {tracer_stats, ReplyTo}) ->
@@ -327,8 +347,8 @@ handle_msg(#state{
         done_ref    = DoneRef,
         done_reply  = DoneReply },
         {trace_delivered, RebarPid, DoneRef}) ->
-    io:put_chars(OutDev, "Tracing completed.\n"),
-    file:close(OutDev),
+    write_file(OutDev, "Tracing completed.\n"),
+    close_file(OutDev),
     DonePid ! {closed, erlang:self(), DoneReply},
     erlang:exit(normal);
 
@@ -355,25 +375,24 @@ tracer_config([], Result) ->
     Result.
 
 open_output_file(false, File) ->
-    case file:open(File, [write]) of
+    case open_output_file(File) of
         {ok, IoDev} ->
             {File, IoDev};
         {error, Reason} ->
             FN  = gen_output_file(),
             rebar_api:warn(
-                "~s: error ~p opening \"~s\", "
-                "using \"~s\" instead.",
+                "~s: error ~p opening \"~s\", using \"~s\" instead.",
                 [?TRACER, Reason, File, FN]),
             open_output_file(true, FN)
     end;
 
 open_output_file(true, File) ->
-    case file:open(File, [write]) of
+    case open_output_file(File) of
         {ok, IoDev} ->
             {File, IoDev};
         {error, Reason} ->
             rebar_api:abort(
-                "~s: fatal error ~p opening output file \"~s\"",
+                "~s: fatal error ~p opening output file \"~s\".",
                 [?TRACER, Reason, File])
             % doesn't return
     end.
@@ -389,6 +408,32 @@ gen_output_file() ->
     end,
     lists:flatten(FP).
 
+open_output_file(File) ->
+    % Try to open in raw mode for direct writes, which should work for any
+    % local file.  Fall back to using an IO server if it fails, but that
+    % probably means it's not a local filesystem, and performance will likely
+    % be awful.
+    case file:open(File, [write, raw]) of
+        {ok, FD} ->
+            {ok, {raw, FD}};
+        {error, _} ->
+            file:open(File, [write])
+    end.
 
+close_file({raw, FD}) ->
+    file:close(FD);
 
+close_file(IoDev) ->
+    file:close(IoDev).
 
+write_file({raw, FD}, Data) ->
+    file:write(FD, Data);
+
+write_file(IoDev, Data) ->
+    file:write(IoDev, Data).
+
+write_file({raw, FD}, Format, Args) ->
+    file:write(FD, io_lib:format(Format, Args));
+
+write_file(IoDev, Format, Args) ->
+    io:format(IoDev, Format, Args).
