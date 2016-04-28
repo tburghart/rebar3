@@ -95,7 +95,8 @@ run(RawArgs) ->
     {BaseState2, _Args1} = set_options(BaseState1, {[], []}),
     run_aux(BaseState2, RawArgs).
 
-run_aux(State, RawArgs) ->
+run_aux(State0, RawArgs) ->
+    {ok, State} = rebar_prv_trace:init(State0),
     State1 = case os:getenv("REBAR_PROFILE") of
                  false ->
                      State;
@@ -135,7 +136,9 @@ run_aux(State, RawArgs) ->
 
     State9 = rebar_state:code_paths(State8, default, code:get_path()),
 
-    rebar_core:init_command(rebar_state:command_args(State9, Args), Task).
+    Result = rebar_core:init_command(rebar_state:command_args(State9, Args), Task),
+    rebar_trace:kill(),
+    Result.
 
 init_config() ->
     %% Initialize logging system
