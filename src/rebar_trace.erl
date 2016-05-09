@@ -17,128 +17,50 @@
 
 -module(rebar_trace).
 
--export([init/1, kill/0, stats/0, format_error/1]).
+-export([init/2, kill/0, running/0, stats/0, format_error/1]).
 
--define(TRACER,     rebar_tracer).
--define(TRACER_STR, "rebar_tracer").
--define(PROVIDER,   rebar_prv_trace).
+% tracer process entry point, exported so it can be spawned directly for
+% visibility rather than hiding it inside erlang:apply/2
+-export([tracer_proc/3]).
 
--define(SHORT_DESC, "Rebar Tracer").
--define(LONG_DESC,  ?SHORT_DESC ".
+-define(TRACER_REG, rebar_tracer).
 
-Important:
- - Tracing is global, regardless of the profile it's configured in!
- - Tracing is heavyweight, use it ONLY for debugging!
- - Tracing WILL slow rebar down, possibly a LOT!
-
-Configuration:
-  The presence of the " ?TRACER_STR " configuration stanza in rebar.config
-  enables tracing functionality. If the configuration is not present, the
-  tracer is not initialized and has no effect. Recognized configuration
-  elements are as follows:
-
-{" ?TRACER_STR ", [
-    {trace_file,    \"my_trace.txt\"},
-    {trace_opts,    [call, return_to]},
-    {trace_match,   [
-        {rebar_core, '_', '_'},
-        {{my_plugin, '_', '_'}, true, [local]}
-    ]}
-]}.
-
-'trace_file': If specified, the path to the file into which trace records are
-  written. If not specified, a file name is generated in the form
-  \"" ?TRACER_STR ".NNN\" in the '/tmp' directory if it exists, or the current
-  directory if it does not.
-
-'trace_opts': Options to be passed in the 3rd parameter of erlang:trace/3. If
-  not specified, options shown in the example above are the default. The 1st
-  and 2nd parameters to erlang:trace/3 are Rebar's Pid and 'true',
-  respectively. The tracing process runs under a separate Pid and is not
-  itself traceable through this facility.
-
-'trace_match': The list of match specifications provided to
-  erlang:trace_pattern/3. If not specified, the tracer process will run, and
-  the trace file will be created, but the facility will effectively be
-  dormant unless match specifications are added dynamically.
-  Each pattern consists of a tuple with 1, 2, or 3 elements, with the
-  2nd and 3rd elements defaulting to 'true' and '[]' if not supplied. As a
-  special case, a standalone MFA tuple will be effectively wrapped in '{}'
-  and treated as above.
-  WARNING: Specifying a match pattern of {'_', '_', '_'} is a VERY bad idea and
-  will bring rebar to its knees!
-
-References:
- - http://erlang.org/doc/man/erlang.html#trace-3
- - http://erlang.org/doc/man/erlang.html#trace_pattern-3
- - http://erlang.org/doc/apps/erts/match_spec.html
-
-Command Line:
-  The only supported command-line usage is simply \"" ?TRACER_STR "\", which
-  displays the current configuration and minimal statistics.
-").
+-type out_dev()         :: {raw, file:fd()} | pid().
+-type file_spec()       :: file:filename_all().
+-type tracer_state()    :: #state{}.
+-type tracer_stat()     :: {atom(), atom() | string()}.
+-type tracer_stats()    :: [tracer_stat()].
+-type tracer_conf()     :: {atom(), atom() | string()}.
+-type tracer_confs()    :: [tracer_conf()].
 
 -record(state, {
-    outdev,
-    rebar_pid,
-    count       = 0,
-    fmt_4       = "~p:~n\t~p~n",
-    fmt_5       = "~p:~n\t~p~n\t~p~n",
-    fmt_ts_4    = "~p:~p:~n\t~p~n",
-    fmt_ts_5    = "~p:~p:~n\t~p~n\t~p~n",
-    done_pid    = undefined,
-    done_ref    = undefined,
-    done_reply  = undefined
+    out_dev                         :: out_dev(),
+    rebar_pid                       :: pid(),
+    trace_count = 0                 :: non_neg_integer(),
+    fmt_2       = "~p: ~p~n"        :: string(),
+    fmt_3       = "~p: ~p ~p~n"     :: string(),
+    fmt_ts_3    = "~p:~p: ~p~n"     :: string(),
+    fmt_t3_4    = "~p:~p: ~p ~p~n"  :: string(),
+    done_pid    = undefined         :: undefined | pid(),
+    done_ref    = undefined         :: undefined | reference(),
+    done_reply  = undefined         :: term()
 }).
 
 %% ===================================================================
 %% Public API
 %% ===================================================================
 
--spec init(State :: rebar_state:t())
-        -> {ok, rebar_state:t()} | {error, {?MODULE, term()}}.
+-spec init(State :: rebar_state:t(), Caller :: atom())
+        -> rebar_state:t() | {error, term()} | no_return().
 %%
 %% @doc Installs the trace handler.
 %%
-init(State) ->
-    %
-    % Alas, the #provider{} record isn't publicly defined, but we know the
-    % first two fields after the record tag are the name and module.
-    %
-    case lists:keyfind(?TRACER, 2, rebar_state:providers(State)) of
-        false ->
-            % not installed yet
-            case tracer_init(State) of
-                {error, {?MODULE, _}} = Err ->
-                    Err;
-                {error, Reason} ->
-                    {error, {?MODULE, Reason}};
-                _ ->
-                    % install the provider even if the tracer itself isn't
-                    % configured so it'll show up in help
-                    Prov = providers:create([
-                        {name,          ?TRACER},
-                        {module,        ?PROVIDER},
-                        {bare,          true},
-                        {deps,          []},
-                        {example,       example(State)},
-                        {opts,          []},
-                        {short_desc,    ?SHORT_DESC},
-                        {desc,          ?LONG_DESC}
-                    ]),
-                    {ok, rebar_state:add_provider(State, Prov)}
-            end;
-        Rec ->
-            case erlang:element(3, Rec) of
-                ?PROVIDER ->
-                    ok;
-                Mod ->
-                    rebar_api:warn(
-                        "provider '~s' already installed as module '~s', "
-                        "skipping install as module '~s'",
-                        [?TRACER, Mod, ?MODULE])
-            end,
-            {ok, State}
+init(State, Caller) ->
+    case tracer_init(State) of
+        {error, _} = Error ->
+            handle_init_error(State, Error, Caller);
+        _ ->
+            State
     end.
 
 -spec kill() -> ok | {error, {?MODULE, term()}}.
@@ -155,7 +77,19 @@ kill() ->
             ok
     end.
 
--spec stats() -> {?TRACER, [{atom(), term()}]} | {error, {?MODULE, term()}}.
+-spec running() -> boolean().
+%%
+%% @doc Reports whether the tracer is running.
+%%
+running() ->
+    case erlang:whereis(?TRACER_REG) of
+        undefined ->
+            false;
+        _ ->
+            true
+    end.
+
+-spec stats() -> {?TRACER_REG, tracer_stats()} | {error, {?MODULE, term()}}.
 %%
 %% @doc Return the tracer configuration.
 %%
@@ -166,7 +100,7 @@ stats() ->
         {error, Reason} ->
             {error, {?MODULE, Reason}};
         Stats ->
-            {?TRACER, Stats}
+            {?TRACER_REG, Stats}
     end.
 
 -spec format_error(Error :: term()) -> string().
@@ -180,43 +114,70 @@ format_error(Error) ->
 %% Internal
 %% ===================================================================
 
-example(State) ->
-    Exec = case rebar_state:escript_path(State) of
-        undefined ->
-            "rebar3";
-        Path ->
-            lists:last(filename:split(Path))
-    end,
-    lists:flatten(io_lib:format("~s ~s", [Exec, ?TRACER])).
+-spec handle_init_error(
+    State :: rebar_state:t(), Error :: {error, term()}, Caller :: atom())
+        -> rebar_state:t() | {error, {?MODULE, term()}} | no_return().
+%
+% "Do the right thing" when an initialization error occurs.
+% This handles whatever comes out of tracer_init/1.
+%
+handle_init_error(State, {error, init_timeout = Err}, provider = Caller) ->
+    rebar_api:error("~s: ~s failed to start: ~s", [?MODULE, ?TRACER_REG, Err]),
+    handle_init_error(State, {error, {?MODULE, Err}}, Caller);
 
+handle_init_error(State, {error, init_timeout}, _Caller) ->
+    % this is (presumably) the call from rebar initialization,
+    % give it another chance at provider initialization
+    State;
+
+handle_init_error(_State, {error, {?MODULE, _}} = Error, provider) ->
+    Error;
+
+handle_init_error(_State, {error, {?MODULE, _} = ModErr}, _Caller) ->
+    erlang:error(ModErr);
+
+handle_init_error(State, {error, Err}, Caller) ->
+    handle_init_error(State, {error, {?MODULE, Err}}, Caller).
+
+-spec tracer_init(State :: rebar_state:t()) -> atom() | {error, term()}.
+%
+% Maybe start the tracer process.
+% Error results must be properly handled by handle_init_error/3.
+%
 tracer_init(State) ->
-    case erlang:whereis(?TRACER) of
+    case erlang:whereis(?TRACER_REG) of
         undefined ->
-            case rebar_state:get(State, ?TRACER, []) of
+            case rebar_state:get(State, ?TRACER_REG, []) of
                 [] ->
                     no_config;
                 Config ->
-                    rebar_api:debug("~s: Config:~n~p", [?TRACER, Config]),
-                    ThisPid = erlang:self(),
-                    Tracer  = erlang:spawn(erlang, apply,
-                        [fun tracer_proc/3, [ThisPid, ThisPid, Config]]),
+                    rebar_api:debug("~s: Config:~n~p", [?TRACER_REG, Config]),
+                    Rebar   = erlang:self(),
+                    Starter = Rebar,
+                    Tracer  = erlang:spawn(
+                        ?MODULE, tracer_proc, [Rebar, Starter, Config]),
                     receive
-                        {?TRACER, running, ThisPid} ->
-                            erlang:register(?TRACER, Tracer),
-                            ok
+                        {?TRACER_REG, running, Tracer, Rebar} ->
+                            erlang:register(?TRACER_REG, Tracer),
+                            ok;
+                        {?TRACER_REG, error, Tracer, Error} ->
+                            {error, Error}
                     after
                         10000 ->
-                            rebar_api:error("~s failed to start", [?TRACER]),
                             erlang:exit(Tracer, timeout),
-                            {error, timeout}
+                            % error handling depends on this NOT including
+                            % the ?MODULE - that is, this precise tuple gets
+                            % special handling
+                            {error, init_timeout}
                     end
             end;
         _ ->
             ok
     end.
 
+-spec tracer_kill(pid()) -> term().
 tracer_kill(ReplyTo) ->
-    case erlang:whereis(?TRACER) of
+    case erlang:whereis(?TRACER_REG) of
         undefined ->
             not_running;
         Tracer ->
@@ -227,10 +188,11 @@ tracer_kill(ReplyTo) ->
             end
     end.
 
+-spec tracer_stats(pid()) -> tracer_stats().
 tracer_stats(ReplyTo) ->
-    case erlang:whereis(?TRACER) of
+    case erlang:whereis(?TRACER_REG) of
         undefined ->
-            rebar_api:warn("~s is not running!", [?TRACER]),
+            rebar_api:warn("~s is not running!", [?TRACER_REG]),
             [];
         Tracer ->
             Tracer ! {tracer_stats, ReplyTo},
@@ -240,6 +202,7 @@ tracer_stats(ReplyTo) ->
             end
     end.
 
+-spec tracer_proc(pid(), pid(), tracer_confs()) -> no_return().
 tracer_proc(RebarPid, Starter, Config) ->
     {Gen, File} = case proplists:get_value(trace_file, Config) of
         undefined ->
@@ -253,7 +216,7 @@ tracer_proc(RebarPid, Starter, Config) ->
                     rebar_api:warn(
                         "~s: error ~p creating directory for \"~s\", "
                         "using \"~s\" instead.",
-                        [?TRACER, Reason, TraceFile, FN]),
+                        [?TRACER_REG, Reason, TraceFile, FN]),
                     {true, FN}
             end
     end,
@@ -264,18 +227,24 @@ tracer_proc(RebarPid, Starter, Config) ->
         error:What ->
             rebar_api:abort(
                 "~s: fatal error ~p initializing trace with options ~p",
-                [?TRACER, What, Opts])
+                [?TRACER_REG, What, Opts])
     end,
-    erlang:put({?TRACER, trace_opts}, Opts),
+    erlang:put({?TRACER_REG, trace_opts}, Opts),
     Filters = proplists:get_value(trace_match, Config, []),
     lists:foreach(fun set_trace/1, Filters),
     {OutFile, OutDev} = open_output_file(Gen, File),
-    erlang:put({?TRACER, trace_file}, OutFile),
+    erlang:put({?TRACER_REG, trace_file}, OutFile),
+    State = #state{out_dev = OutDev, rebar_pid = RebarPid},
     erlang:process_flag(trap_exit, true),
     erlang:process_flag(priority, high),
     % tell the starter it's running
-    Starter ! {?TRACER, running, RebarPid},
-    tracer_recv(#state{outdev = OutDev, rebar_pid = RebarPid}).
+    Starter ! {?TRACER_REG, running, erlang:self(), RebarPid},
+    tracer_recv(State).
+
+-spec set_trace(tuple()) -> term().
+%
+% add or update the specified trace pattern
+%
 
 set_trace({M, F, _} = MFA)
         when erlang:is_atom(M) andalso erlang:is_atom(F) ->
@@ -290,24 +259,24 @@ set_trace({MFA, MatchSpec}) ->
 set_trace({MFA, MatchSpec, Flags} = Filt) ->
     try
         erlang:trace_pattern(MFA, MatchSpec, Flags),
-        Filts = case erlang:get({?TRACER, filters}) of
+        Filts = case erlang:get({?TRACER_REG, filters}) of
             undefined ->
                 [];
             List ->
                 proplists:delete(MFA, List)
         end,
-        erlang:put({?TRACER, filters}, [{MFA, {MatchSpec, Flags}} | Filts]),
+        erlang:put({?TRACER_REG, filters}, [{MFA, {MatchSpec, Flags}} | Filts]),
         ok
     catch
         error:What ->
             rebar_api:warn(
                 "~s: error ~p setting trace pattern ~p, skipping",
-                [?TRACER, What, Filt]),
-            {error, {?MODULE, What}}
+                [?TRACER_REG, What, Filt])
     end.
 
+-spec tracer_recv(State:: tracer_state()) -> no_return().
 %
-% messages are handled in the order received, no filtering
+% messages are handled in the order received, no queue filtering
 %
 tracer_recv(State) ->
     receive
@@ -315,37 +284,43 @@ tracer_recv(State) ->
             handle_msg(State, Msg)
     end.
 
-handle_msg(#state{outdev = OutDev, count = Count, fmt_4 = Format} = State,
+-spec handle_msg(State:: tracer_state(), tuple()) -> no_return().
+%
+% handle one received message
+%
+
+handle_msg(#state{
+        out_dev = OutDev, trace_count = Count, fmt_2 = Format} = State,
         {trace, _Pid, Op, Inf1}) ->
     write_file(OutDev, Format, [Op, Inf1]),
-    tracer_recv(State#state{count = (Count + 1)});
+    tracer_recv(State#state{trace_count = (Count + 1)});
 
-handle_msg(#state{outdev = OutDev, count = Count, fmt_5 = Format} = State,
-    {trace, _Pid, Op, Inf1, Inf2}) ->
+handle_msg(#state{
+        out_dev = OutDev, trace_count = Count, fmt_3 = Format} = State,
+        {trace, _Pid, Op, Inf1, Inf2}) ->
     write_file(OutDev, Format, [Op, Inf1, Inf2]),
-    tracer_recv(State#state{count = (Count + 1)});
+    tracer_recv(State#state{trace_count = (Count + 1)});
 
-handle_msg(#state{outdev = OutDev, count = Count, fmt_ts_4 = Format} = State,
-    {trace_ts, _Pid, Op, Inf1, TS}) ->
+handle_msg(#state{
+        out_dev = OutDev, trace_count = Count, fmt_ts_3 = Format} = State,
+        {trace_ts, _Pid, Op, Inf1, TS}) ->
     write_file(OutDev, Format, [Op, TS, Inf1]),
-    tracer_recv(State#state{count = (Count + 1)});
+    tracer_recv(State#state{trace_count = (Count + 1)});
 
-handle_msg(#state{outdev = OutDev, count = Count, fmt_ts_5 = Format} = State,
-    {trace_ts, _Pid, Op, Inf1, Inf2, TS}) ->
+handle_msg(#state{
+        out_dev = OutDev, trace_count = Count, fmt_t3_4 = Format} = State,
+        {trace_ts, _Pid, Op, Inf1, Inf2, TS}) ->
     write_file(OutDev, Format, [Op, TS, Inf1, Inf2]),
-    tracer_recv(State#state{count = (Count + 1)});
+    tracer_recv(State#state{trace_count = (Count + 1)});
 
-handle_msg(#state{count = Count} = State, {tracer_stats, ReplyTo}) ->
+handle_msg(#state{trace_count = Count} = State, {tracer_stats, ReplyTo}) ->
     Stats = [{count, Count} | tracer_config(erlang:get(), [])],
     ReplyTo ! {tracer_stats, erlang:self(), Stats},
     tracer_recv(State);
 
 handle_msg(#state{
-        outdev      = OutDev,
-        rebar_pid   = RebarPid,
-        done_pid    = DonePid,
-        done_ref    = DoneRef,
-        done_reply  = DoneReply },
+        out_dev = OutDev, rebar_pid = RebarPid,
+        done_pid = DonePid, done_ref = DoneRef, done_reply = DoneReply},
         {trace_delivered, RebarPid, DoneRef}) ->
     write_file(OutDev, "Tracing completed.\n"),
     close_file(OutDev),
@@ -354,18 +329,22 @@ handle_msg(#state{
 
 handle_msg(#state{rebar_pid = RebarPid} = State, {'EXIT', From, Why}) ->
     Ref = erlang:trace_delivered(RebarPid),
-    tracer_recv(State#state{
-        done_pid = From, done_ref = Ref, done_reply = Why});
+    tracer_recv(State#state{done_pid = From, done_ref = Ref, done_reply = Why});
 
 handle_msg(State, {set_trace, ReplyTo, Spec}) ->
     ReplyTo ! {set_trace, Spec, erlang:self(), set_trace(Spec)},
     tracer_recv(State);
 
 handle_msg(State, Msg) ->
-    rebar_api:debug("~s: unhandled message: ~p", [?TRACER, Msg]),
+    rebar_api:debug("~s: unhandled message: ~p", [?TRACER_REG, Msg]),
     tracer_recv(State).
 
-tracer_config([{{?TRACER, Key}, Val} | Rest], Result) ->
+-spec tracer_config([{term(), term()}], tracer_stats()) -> tracer_stats().
+%
+% list filter for tracer process environment entries
+%
+
+tracer_config([{{?TRACER_REG, Key}, Val} | Rest], Result) ->
     tracer_config(Rest, [{Key, Val} | Result]);
 
 tracer_config([_KV | Rest], Result) ->
@@ -373,6 +352,12 @@ tracer_config([_KV | Rest], Result) ->
 
 tracer_config([], Result) ->
     Result.
+
+-spec open_output_file(Generated :: boolean(), File :: file_spec())
+        -> {file_spec(), out_dev()} | no_return().
+%
+% open some output file for writing, or die trying
+%
 
 open_output_file(false, File) ->
     case open_output_file(File) of
@@ -382,7 +367,7 @@ open_output_file(false, File) ->
             FN  = gen_output_file(),
             rebar_api:warn(
                 "~s: error ~p opening \"~s\", using \"~s\" instead.",
-                [?TRACER, Reason, File, FN]),
+                [?TRACER_REG, Reason, File, FN]),
             open_output_file(true, FN)
     end;
 
@@ -393,12 +378,12 @@ open_output_file(true, File) ->
         {error, Reason} ->
             rebar_api:abort(
                 "~s: fatal error ~p opening output file \"~s\".",
-                [?TRACER, Reason, File])
+                [?TRACER_REG, Reason, File])
             % doesn't return
     end.
 
 gen_output_file() ->
-    FN  = io_lib:format("~s.~b", [?TRACER,
+    FN  = io_lib:format("~s.~b", [?TRACER_REG,
             erlang:phash2([erlang:self(), os:timestamp()])]),
     FP  = case filelib:is_dir("/tmp") of
         true ->
@@ -408,11 +393,15 @@ gen_output_file() ->
     end,
     lists:flatten(FP).
 
+-spec open_output_file(File :: file_spec()) -> out_dev() | {error, term()}.
+%
+% Open the specified file for writing.
+%
+% Try to open in raw mode for direct writes, which should work for any local
+% file.  Fall back to using an IO server if it fails, but that probably means
+% it's not a local filesystem, and performance will likely be awful.
+%
 open_output_file(File) ->
-    % Try to open in raw mode for direct writes, which should work for any
-    % local file.  Fall back to using an IO server if it fails, but that
-    % probably means it's not a local filesystem, and performance will likely
-    % be awful.
     case file:open(File, [write, raw]) of
         {ok, FD} ->
             {ok, {raw, FD}};
@@ -420,17 +409,23 @@ open_output_file(File) ->
             file:open(File, [write])
     end.
 
+-spec close_file(out_dev()) -> ok | {error, term()}.
+
 close_file({raw, FD}) ->
     file:close(FD);
 
 close_file(IoDev) ->
     file:close(IoDev).
 
+-spec write_file(out_dev(), iodata()) -> ok | {error, term()}.
+
 write_file({raw, FD}, Data) ->
     file:write(FD, Data);
 
 write_file(IoDev, Data) ->
     file:write(IoDev, Data).
+
+-spec write_file(out_dev(), io:format(), [term()]) -> ok | {error, term()}.
 
 write_file({raw, FD}, Format, Args) ->
     file:write(FD, io_lib:format(Format, Args));

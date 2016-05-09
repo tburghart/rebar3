@@ -95,8 +95,9 @@ run(RawArgs) ->
     {BaseState2, _Args1} = set_options(BaseState1, {[], []}),
     run_aux(BaseState2, RawArgs).
 
-run_aux(State0, RawArgs) ->
-    {ok, State} = rebar_prv_trace:init(State0),
+run_aux(InitState, RawArgs) ->
+    State = rebar_trace:init(InitState,
+                rebar_state:get(InitState, caller, rebar)),
     State1 = case os:getenv("REBAR_PROFILE") of
                  false ->
                      State;
