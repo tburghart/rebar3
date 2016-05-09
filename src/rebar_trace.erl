@@ -25,14 +25,6 @@
 
 -define(TRACER_REG, rebar_tracer).
 
--type out_dev()         :: {raw, file:fd()} | pid().
--type file_spec()       :: file:filename_all().
--type tracer_state()    :: #state{}.
--type tracer_stat()     :: {atom(), atom() | string()}.
--type tracer_stats()    :: [tracer_stat()].
--type tracer_conf()     :: {atom(), atom() | string()}.
--type tracer_confs()    :: [tracer_conf()].
-
 -record(state, {
     out_dev                         :: out_dev(),
     rebar_pid                       :: pid(),
@@ -45,6 +37,14 @@
     done_ref    = undefined         :: undefined | reference(),
     done_reply  = undefined         :: term()
 }).
+
+-type out_dev()         :: {raw, file:fd()} | pid().
+-type file_spec()       :: file:filename_all().
+-type tracer_state()    :: #state{}.
+-type tracer_stat()     :: {atom(), atom() | string()}.
+-type tracer_stats()    :: [tracer_stat()].
+-type tracer_conf()     :: {atom(), atom() | string()}.
+-type tracer_confs()    :: [tracer_conf()].
 
 %% ===================================================================
 %% Public API
